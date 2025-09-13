@@ -53,20 +53,37 @@ def get_tools(qa_chain, serpapi_key: str):
         )
     )
     
-    # 添加搜索工具（如果配置了密钥）
-    if serpapi_key and serpapi_key != "你的SerpAPIKey":
+    # 添加搜索工具（如果配置了有效密钥）
+    if serpapi_key and serpapi_key != "your_serpapi_key_here" and serpapi_key != "你的SerpAPIKey":
         try:
             search = SerpAPIWrapper(serpapi_api_key=serpapi_key)
             tools.append(
                 Tool(
                     name="网页搜索",
-                    func=search.run,
+                    func=lambda query: search.run(query) if search else "搜索服务暂不可用",
                     description="通过搜索引擎获取最新信息"
                 )
             )
+            logger.info("搜索工具已启用")
         except Exception as e:
             logger.warning(f"搜索工具初始化失败: {str(e)}")
+            # 添加一个模拟搜索工具，返回友好提示
+            tools.append(
+                Tool(
+                    name="网页搜索",
+                    func=lambda query: "搜索功能暂不可用，请检查SerpAPI配置。系统将继续使用本地知识库回答问题。",
+                    description="通过搜索引擎获取最新信息（当前不可用）"
+                )
+            )
     else:
         logger.info("未配置SerpAPI密钥，跳过搜索工具")
+        # 添加一个模拟搜索工具
+        tools.append(
+            Tool(
+                name="网页搜索",
+                func=lambda query: "搜索功能未启用，系统仅使用本地PDF文档和AI知识库回答问题。如需启用搜索，请配置SerpAPI密钥。",
+                description="通过搜索引擎获取最新信息（未启用）"
+            )
+        )
     
     return tools

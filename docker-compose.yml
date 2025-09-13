@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  ai-langchain:
+    build: .
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      - ./cache:/app/cache
+      - ./docs:/app/docs
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SERPAPI_KEY=${SERPAPI_KEY}
+      - MODEL_NAME=${MODEL_NAME:-gpt-3.5-turbo}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://api.chatanywhere.tech}
+      - PDF_FOLDER=${PDF_FOLDER:-docs/}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 可选：添加监控服务
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - GF_SECURITY_ADMIN_PASSWORD=admin123
