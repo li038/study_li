@@ -5,8 +5,8 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 
 
-# rag_setup.py
 def create_rag_chain(texts, model_name, openai_api_key, base_url=None):
+    """创建RAG链，兼容新旧版本"""
     embeddings = OpenAIEmbeddings(
         openai_api_key=openai_api_key,
         model="text-embedding-3-small",
@@ -20,13 +20,17 @@ def create_rag_chain(texts, model_name, openai_api_key, base_url=None):
         base_url=base_url
     )
 
+    # 使用ConversationBufferMemory（虽然显示弃用警告，但仍可用）
+    # 未来可以迁移到LangGraph，但当前保持兼容性
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
     qa_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=docsearch.as_retriever(),
-        memory=memory
+        memory=memory,
+        verbose=True,
+        return_source_documents=True
     )
 
-    return qa_chain, llm  # 把 llm 单独返回
+    return qa_chain, llm
 

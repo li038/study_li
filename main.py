@@ -56,7 +56,7 @@ class AIDocumentAssistant:
             raise
     
     def chat_with_ai(self, message: str, history: List[Dict[str, str]], session_id: str) -> Tuple[List[Dict[str, str]], str]:
-        """与AI对话"""
+        """与AI对话，确保中文回答"""
         try:
             if not message.strip():
                 return history, session_id
@@ -64,11 +64,35 @@ class AIDocumentAssistant:
             if not session_id or session_id not in chat_manager.sessions:
                 session_id = chat_manager.create_session(f"对话_{len(chat_manager.sessions) + 1}")
             
-            cache_key = f"{message}_{session_id}"
-            response = cache_manager.get(cache_key) or (self.agent.run(message) if self.agent else "系统尚未初始化")
-            
-            if not cache_manager.get(cache_key):
-                cache_manager.set(cache_key, response, ttl=3600)
+            # 检查系统是否初始化
+            if not self.agent:
+                response = "抱歉，系统尚未初始化，请确保已上传PDF文档"
+            else:
+                # 检查是否有文档
+                if not self.loaded_documents:
+                    response = "抱歉，当前没有加载任何文档，请先上传PDF文件"
+                else:
+                    cache_key = f"{message}_{session_id}"
+                    cached_response = cache_manager.get(cache_key)
+                    
+                    if cached_response:
+                        response = cached_response
+                    else:
+                        try:
+                            # 添加中文提示
+                            chinese_prompt = f"请用中文回答以下问题：{message}"
+                            ai_response = self.agent.run(chinese_prompt)
+                            
+                            if ai_response and len(ai_response.strip()) > 0:
+                                response = ai_response
+                            else:
+                                response = "抱歉，我查询不到相关内容，请尝试换个问题或上传更多文档"
+                        except Exception as e:
+                            logger.error(f"AI查询错误: {e}")
+                            response = "抱歉，我暂时无法回答这个问题，请稍后再试"
+                    
+                    if not cache_manager.get(cache_key):
+                        cache_manager.set(cache_key, response, ttl=3600)
             
             chat_manager.add_message(session_id, "user", message)
             chat_manager.add_message(session_id, "assistant", response)
@@ -77,8 +101,10 @@ class AIDocumentAssistant:
             
         except Exception as e:
             logger.error(f"聊天错误: {e}")
-            history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": str(e)}])
-            return history, session_id
+            error_message = "抱歉，系统遇到了一些问题，请稍后再试"
+            chat_manager.add_message(session_id, "user", message)
+            chat_manager.add_message(session_id, "assistant", error_message)
+            return chat_manager.get_chat_history(session_id), session_id
     
     def upload_and_process_files(self, files: List[str]) -> str:
         """上传并处理文件"""
@@ -125,11 +151,11 @@ class AIDocumentAssistant:
         try:
             pdf_files = list(Path(PDF_FOLDER).glob("*.pdf"))
             if not pdf_files:
-                return "未找到PDF文件"
+                return "抱歉，当前没有任何PDF文档可供搜索，请先上传文档"
             
             results = pdf_processor.search_pdfs_by_keyword([str(f) for f in pdf_files], keyword)
             if not results:
-                return f"未找到包含 '{keyword}' 的内容"
+                return f"抱歉，在文档中没有查询到包含 '{keyword}' 的相关内容，请尝试使用其他关键词"
             
             return "\n\n".join([
                 f"📄 {r['filename']} - 第{r['page']}页 ({r['occurrences']}处匹配)\n预览: {r['preview']}"
@@ -137,7 +163,8 @@ class AIDocumentAssistant:
             ])
             
         except Exception as e:
-            return f"搜索出错: {str(e)}"
+            logger.error(f"搜索错误: {e}")
+            return "抱歉，搜索时遇到了一些问题，请稍后再试"
     
     def create_interface(self):
         """创建Gradio界面"""
@@ -257,7 +284,27 @@ assistant = AIDocumentAssistant()
 
 if __name__ == "__main__":
     try:
-        assistant.create_interface().launch(server_name="0.0.0.0", server_port=7862, show_error=True)
+        # 使用环境变量或默认端口7860
+        import os
+        port = int(os.getenv("GRADIO_SERVER_PORT", "7860"))
+        assistant.create_interface().launch(
+            server_name="0.0.0.0", 
+            server_port=port, 
+            show_error=True,
+            share=False
+        )
+    except OSError as e:
+        if "Cannot find empty port" in str(e):
+            logger.warning(f"端口{port}被占用，尝试使用随机端口")
+            assistant.create_interface().launch(
+                server_name="0.0.0.0", 
+                server_port=None,  # 使用随机端口
+                show_error=True,
+                share=False
+            )
+        else:
+            logger.error(f"启动失败: {e}")
+            raise
     except Exception as e:
         logger.error(f"启动失败: {e}")
         raise

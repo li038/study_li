@@ -26,8 +26,9 @@ class CacheManager:
         (self.cache_dir / "metadata").mkdir(exist_ok=True)
     
     def _generate_key(self, data: str) -> str:
-        """生成缓存键"""
-        return hashlib.md5(data.encode()).hexdigest()
+        """生成缓存键（使用哈希避免中文和特殊字符问题）"""
+        # 使用SHA256生成更安全的哈希值
+        return hashlib.sha256(data.encode('utf-8')).hexdigest()[:32]
     
     def _get_cache_path(self, key: str, cache_type: str = "text") -> Path:
         """获取缓存文件路径"""
