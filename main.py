@@ -9,8 +9,10 @@ from typing import List, Tuple, Dict
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import *
-from src.core.pdf_processor import PDFProcessor
 from src.core.chat_manager import ChatManager
+from src.core.pdf_processor import PDFProcessor
+from src.core.document_processor import DocumentProcessor
+from src.core.document_analyzer import DocumentAnalyzer
 from src.utils.cache_manager import CacheManager
 from src.utils.logger import get_logger, logger_manager
 
@@ -32,6 +34,8 @@ class AIDocumentAssistant:
         self.qa_chain = None
         self.llm = None
         self.agent = None
+        self.document_processor = DocumentProcessor()
+        self.document_analyzer = None  # 延迟初始化
         
     def initialize_system(self):
         """初始化系统"""
@@ -107,18 +111,32 @@ class AIDocumentAssistant:
             return chat_manager.get_chat_history(session_id), session_id
     
     def upload_and_process_files(self, files: List[str]) -> str:
-        """上传并处理文件"""
+        """上传并处理多种格式的文件"""
         if not files:
             return "没有文件被上传"
         
+        from src.core.document_processor import DocumentProcessor
+        
+        doc_processor = DocumentProcessor()
         results, new_documents = [], []
         
         for file_path in files:
             try:
-                documents = pdf_processor.process_pdf(file_path)
+                file_path = Path(file_path)
+                
+                # 检查文件格式
+                if file_path.suffix.lower() not in doc_processor.supported_formats:
+                    results.append(f"❌ {file_path.name} - 不支持的格式: {file_path.suffix}")
+                    continue
+                
+                # 处理文档
+                documents = doc_processor.process_document(str(file_path))
                 new_documents.extend(documents)
-                info = pdf_processor.get_pdf_info(file_path)
-                results.append(f"✅ {info['filename']} - {info['total_pages']}页, {len(documents)}个片段")
+                
+                # 获取文档信息
+                info = doc_processor.get_document_info(str(file_path))
+                results.append(f"✅ {info['filename']} - {info['format']}格式, {info['size']}, {info['pages']}")
+                
             except Exception as e:
                 results.append(f"❌ {os.path.basename(file_path)} - 处理失败: {str(e)}")
         
@@ -165,6 +183,42 @@ class AIDocumentAssistant:
         except Exception as e:
             logger.error(f"搜索错误: {e}")
             return "抱歉，搜索时遇到了一些问题，请稍后再试"
+
+    def analyze_single_document(self, file) -> tuple:
+        """分析单个文档"""
+        try:
+            if not file:
+                return {}, "请先上传文档", ""
+            
+            # 确保LLM已初始化
+            if not self.llm:
+                from rag_setup import create_rag_chain
+                texts = ["临时初始化用于文档分析"]  # 临时文本用于初始化LLM
+                _, self.llm = create_rag_chain(texts, MODEL_NAME, OPENAI_API_KEY, base_url=OPENAI_API_BASE)
+                self.document_analyzer = DocumentAnalyzer(self.llm)
+            elif not self.document_analyzer:
+                self.document_analyzer = DocumentAnalyzer(self.llm)
+            
+            # 处理文档
+            documents = self.document_processor.process_file(file.name)
+            if not documents:
+                return {}, "无法处理该文档", ""
+            
+            # 分析文档
+            analysis = self.document_analyzer.analyze_document(documents)
+            
+            # 格式化输出
+            summary = analysis.get("摘要", "")
+            keywords_html = "<div>"
+            for keyword in analysis.get("关键词", [])[:10]:
+                keywords_html += f"<span style='background: #e3f2fd; padding: 3px 8px; margin: 2px; border-radius: 12px; display: inline-block;'>{keyword}</span>"
+            keywords_html += "</div>"
+            
+            return analysis, summary, keywords_html
+            
+        except Exception as e:
+            logger.error(f"文档分析出错: {e}")
+            return {}, f"分析出错: {str(e)}", ""
     
     def create_interface(self):
         """创建Gradio界面"""
@@ -228,8 +282,8 @@ class AIDocumentAssistant:
                     with gr.Row():
                         with gr.Column():
                             file_upload = gr.File(
-                                label="上传PDF",
-                                file_types=[".pdf"],
+                                label="上传文档",
+                                file_types=[".pdf", ".txt", ".md"],
                                 file_count="multiple"
                             )
                             upload_btn = gr.Button("处理文件", variant="primary")
@@ -242,6 +296,32 @@ class AIDocumentAssistant:
                             )
                             search_btn = gr.Button("搜索", variant="secondary")
                             search_results = gr.Textbox(label="搜索结果", lines=10)
+                
+                # 文档分析界面
+                with gr.TabItem("📊 文档分析"):
+                    with gr.Row():
+                        with gr.Column():
+                            analyze_file = gr.File(
+                                label="选择文档进行分析",
+                                file_types=[".pdf", ".txt", ".md"]
+                            )
+                            analyze_btn = gr.Button("📊 开始分析", variant="primary")
+                        
+                        with gr.Column():
+                            analysis_output = gr.JSON(label="分析结果")
+                            summary_text = gr.Textbox(label="文档摘要", lines=5)
+                            keywords_list = gr.HTML(label="关键词")
+                
+                # 设置界面
+                with gr.TabItem("⚙️ 设置"):
+                    gr.Markdown("### 系统配置")
+                    model_dropdown = gr.Dropdown(
+                        choices=["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"],
+                        value=MODEL_NAME,
+                        label="选择模型"
+                    )
+                    temp_slider = gr.Slider(0, 2, 0.7, label="温度参数")
+                    max_tokens = gr.Slider(100, 4000, 1000, label="最大回复长度")
             
             # 事件处理
             interface.load(
@@ -275,6 +355,25 @@ class AIDocumentAssistant:
             export_btn.click(
                 lambda sid: chat_manager.export_session(sid.split(":")[0]) if sid else "请先选择会话",
                 [session_dropdown], gr.Textbox(label="导出结果")
+            )
+            
+            # 文档分析事件
+            analyze_btn.click(
+                assistant.analyze_single_document,
+                inputs=[analyze_file],
+                outputs=[analysis_output, summary_text, keywords_list]
+            )
+            
+            # 设置事件
+            model_dropdown.change(
+                lambda x: setattr(assistant, 'llm', None) or setattr(assistant, 'qa_chain', None) or setattr(assistant, 'agent', None),
+                inputs=[model_dropdown],
+                outputs=[]
+            )
+            
+            temp_slider.change(
+                lambda x: setattr(assistant, 'temperature', x),
+                inputs=[temp_slider]
             )
         
         return interface
