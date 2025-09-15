@@ -60,7 +60,7 @@ class AIDocumentAssistant:
             raise
     
     def chat_with_ai(self, message: str, history: List[Dict[str, str]], session_id: str) -> Tuple[List[Dict[str, str]], str]:
-        """与AI对话，确保中文回答"""
+        """与AI对话，智能优先从知识库找答案，找不到再用大模型回复"""
         try:
             if not message.strip():
                 return history, session_id
@@ -68,35 +68,46 @@ class AIDocumentAssistant:
             if not session_id or session_id not in chat_manager.sessions:
                 session_id = chat_manager.create_session(f"对话_{len(chat_manager.sessions) + 1}")
             
-            # 检查系统是否初始化
-            if not self.agent:
-                response = "抱歉，系统尚未初始化，请确保已上传PDF文档"
+            cache_key = f"{message}_{session_id}"
+            cached_response = cache_manager.get(cache_key)
+            
+            if cached_response:
+                response = cached_response
             else:
-                # 检查是否有文档
-                if not self.loaded_documents:
-                    response = "抱歉，当前没有加载任何文档，请先上传PDF文件"
+                # 优先尝试从知识库获取答案
+                knowledge_response = None
+                if self.agent and self.loaded_documents:
+                    try:
+                        # 使用知识库查询
+                        chinese_prompt = f"请基于已上传的文档内容，用中文回答以下问题：{message}"
+                        knowledge_response = self.agent.run(chinese_prompt)
+                        
+                        # 检查知识库是否有有效回答
+                        if not knowledge_response or len(knowledge_response.strip()) < 10 or "找不到" in knowledge_response or "未找到" in knowledge_response:
+                            knowledge_response = None
+                    except Exception as e:
+                        logger.warning(f"知识库查询失败: {e}")
+                        knowledge_response = None
+                
+                # 如果知识库没有答案，使用大模型通用回复
+                if knowledge_response:
+                    response = knowledge_response
                 else:
-                    cache_key = f"{message}_{session_id}"
-                    cached_response = cache_manager.get(cache_key)
-                    
-                    if cached_response:
-                        response = cached_response
-                    else:
-                        try:
-                            # 添加中文提示
-                            chinese_prompt = f"请用中文回答以下问题：{message}"
-                            ai_response = self.agent.run(chinese_prompt)
-                            
-                            if ai_response and len(ai_response.strip()) > 0:
-                                response = ai_response
-                            else:
-                                response = "抱歉，我查询不到相关内容，请尝试换个问题或上传更多文档"
-                        except Exception as e:
-                            logger.error(f"AI查询错误: {e}")
-                            response = "抱歉，我暂时无法回答这个问题，请稍后再试"
-                    
-                    if not cache_manager.get(cache_key):
-                        cache_manager.set(cache_key, response, ttl=3600)
+                    try:
+                        # 使用大模型进行通用回复
+                        if self.llm:
+                            general_prompt = f"请用中文回答这个问题：{message}"
+                            response = self.llm.invoke(general_prompt).content
+                        else:
+                            # 如果没有初始化LLM，使用默认回复
+                            response = "抱歉，我暂时无法回答这个问题。"
+                    except Exception as e:
+                        logger.error(f"大模型回复错误: {e}")
+                        response = "抱歉，我暂时无法回答这个问题，请稍后再试"
+                
+                # 缓存回复
+                if not cache_manager.get(cache_key):
+                    cache_manager.set(cache_key, response, ttl=3600)
             
             chat_manager.add_message(session_id, "user", message)
             chat_manager.add_message(session_id, "assistant", response)
@@ -221,162 +232,10 @@ class AIDocumentAssistant:
             return {}, f"分析出错: {str(e)}", ""
     
     def create_interface(self):
-        """创建Gradio界面"""
-        assistant = self
-        
-        def init_session():
-            """初始化会话"""
-            session_id = chat_manager.create_session("新对话")
-            sessions = chat_manager.get_all_sessions()
-            choices = [f"{s['session_id']}: {s['title']}" for s in sessions]
-            return session_id, gr.Dropdown(choices=choices, value=f"{session_id}: 新对话"), gr.Chatbot(value=chat_manager.get_chat_history(session_id))
-        
-        with gr.Blocks(title="AI文档问答系统", theme=gr.themes.Soft()) as interface:
-            gr.Markdown("# 🤖 AI文档问答系统")
-            gr.Markdown("智能文档分析与对话系统")
-            
-            # 初始化系统
-            assistant.initialize_system()
-            
-            with gr.Tabs():
-                # 主聊天界面
-                with gr.TabItem("💬 聊天"):
-                    with gr.Row():
-                        with gr.Column(scale=3):
-                            chatbot = gr.Chatbot(
-                                label="对话历史",
-                                height=400,
-                                type="messages"
-                            )
-                            
-                            with gr.Row():
-                                msg_input = gr.Textbox(
-                                    label="输入消息",
-                                    placeholder="输入你的问题...",
-                                    lines=2,
-                                    scale=4
-                                )
-                                send_btn = gr.Button("发送", variant="primary", scale=1)
-                            
-                            with gr.Row():
-                                clear_btn = gr.Button("清除")
-                                new_session_btn = gr.Button("新会话")
-                                export_btn = gr.Button("导出")
-                        
-                        with gr.Column(scale=1):
-                            session_id_state = gr.State()
-                            session_dropdown = gr.Dropdown(
-                                label="选择会话",
-                                choices=[],
-                                value=None,
-                                interactive=True
-                            )
-                            
-                            with gr.Group():
-                                gr.Markdown("### 系统状态")
-                                doc_count = gr.Markdown(f"已加载 0 个文档片段")
-                                cache_info = gr.Markdown("缓存已启用")
-                
-                # 文件管理
-                with gr.TabItem("📁 文件"):
-                    with gr.Row():
-                        with gr.Column():
-                            file_upload = gr.File(
-                                label="上传文档",
-                                file_types=[".pdf", ".txt", ".md"],
-                                file_count="multiple"
-                            )
-                            upload_btn = gr.Button("处理文件", variant="primary")
-                            upload_result = gr.Textbox(label="处理结果", lines=5)
-                        
-                        with gr.Column():
-                            search_keyword = gr.Textbox(
-                                label="搜索关键词",
-                                placeholder="在文档中搜索..."
-                            )
-                            search_btn = gr.Button("搜索", variant="secondary")
-                            search_results = gr.Textbox(label="搜索结果", lines=10)
-                
-                # 文档分析界面
-                with gr.TabItem("📊 文档分析"):
-                    with gr.Row():
-                        with gr.Column():
-                            analyze_file = gr.File(
-                                label="选择文档进行分析",
-                                file_types=[".pdf", ".txt", ".md"]
-                            )
-                            analyze_btn = gr.Button("📊 开始分析", variant="primary")
-                        
-                        with gr.Column():
-                            analysis_output = gr.JSON(label="分析结果")
-                            summary_text = gr.Textbox(label="文档摘要", lines=5)
-                            keywords_list = gr.HTML(label="关键词")
-                
-                # 设置界面
-                with gr.TabItem("⚙️ 设置"):
-                    gr.Markdown("### 系统配置")
-                    model_dropdown = gr.Dropdown(
-                        choices=["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"],
-                        value=MODEL_NAME,
-                        label="选择模型"
-                    )
-                    temp_slider = gr.Slider(0, 2, 0.7, label="温度参数")
-                    max_tokens = gr.Slider(100, 4000, 1000, label="最大回复长度")
-            
-            # 事件处理
-            interface.load(
-                fn=init_session,
-                outputs=[session_id_state, session_dropdown, chatbot]
-            ).then(
-                lambda: gr.Markdown(f"已加载 {len(assistant.loaded_documents)} 个文档片段"),
-                outputs=[doc_count]
-            )
-            
-            def send_and_clear(message, history, session_id):
-                history, session_id = assistant.chat_with_ai(message, history, session_id or chat_manager.create_session())
-                return history, session_id, ""
-            
-            send_btn.click(send_and_clear, [msg_input, chatbot, session_id_state], [chatbot, session_id_state, msg_input])
-            msg_input.submit(send_and_clear, [msg_input, chatbot, session_id_state], [chatbot, session_id_state, msg_input])
-            
-            new_session_btn.click(init_session, outputs=[session_id_state, session_dropdown, chatbot])
-            
-            session_dropdown.change(
-                lambda s: (s.split(":")[0], chat_manager.get_chat_history(s.split(":")[0])) if s else (None, []),
-                [session_dropdown], [session_id_state, chatbot]
-            )
-            
-            upload_btn.click(assistant.upload_and_process_files, [file_upload], [upload_result]).then(
-                lambda: gr.Markdown(f"已加载 {len(assistant.loaded_documents)} 个文档片段"), outputs=[doc_count]
-            )
-            
-            search_btn.click(assistant.search_in_documents, [search_keyword], [search_results])
-            clear_btn.click(lambda: ([], None), outputs=[chatbot, session_id_state])
-            export_btn.click(
-                lambda sid: chat_manager.export_session(sid.split(":")[0]) if sid else "请先选择会话",
-                [session_dropdown], gr.Textbox(label="导出结果")
-            )
-            
-            # 文档分析事件
-            analyze_btn.click(
-                assistant.analyze_single_document,
-                inputs=[analyze_file],
-                outputs=[analysis_output, summary_text, keywords_list]
-            )
-            
-            # 设置事件
-            model_dropdown.change(
-                lambda x: setattr(assistant, 'llm', None) or setattr(assistant, 'qa_chain', None) or setattr(assistant, 'agent', None),
-                inputs=[model_dropdown],
-                outputs=[]
-            )
-            
-            temp_slider.change(
-                lambda x: setattr(assistant, 'temperature', x),
-                inputs=[temp_slider]
-            )
-        
-        return interface
+        """创建Gradio界面 - 使用新的界面模块"""
+        from src.ui.interface import AIDocumentInterface
+        ui = AIDocumentInterface(self)
+        return ui.create_interface()
 
 # 创建全局实例
 assistant = AIDocumentAssistant()
@@ -386,18 +245,33 @@ if __name__ == "__main__":
         # 使用环境变量或默认端口7860
         import os
         port = int(os.getenv("GRADIO_SERVER_PORT", "7860"))
+        
+        # 获取本机IP地址
+        import socket
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        
+        print("=" * 50)
+        print("AI文档问答系统启动中...")
+        print("=" * 50)
+        print(f"本地访问: http://localhost:{port}")
+        print(f"局域网访问: http://{local_ip}:{port}")
+        print("如需修改端口，请设置环境变量 GRADIO_SERVER_PORT")
+        
         assistant.create_interface().launch(
-            server_name="0.0.0.0", 
+            server_name="0.0.0.0",  # 监听所有网络接口
             server_port=port, 
             show_error=True,
-            share=False
+            share=False  # 关闭Gradio的分享功能，使用本地网络
         )
     except OSError as e:
         if "Cannot find empty port" in str(e):
             logger.warning(f"端口{port}被占用，尝试使用随机端口")
+            new_port = port + 1
+            print(f"端口{port}被占用，尝试使用端口{new_port}")
             assistant.create_interface().launch(
                 server_name="0.0.0.0", 
-                server_port=None,  # 使用随机端口
+                server_port=new_port, 
                 show_error=True,
                 share=False
             )
