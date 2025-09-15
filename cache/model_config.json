@@ -1,0 +1,13 @@
+{
+  "provider": "openai",
+  "openai": {
+    "model": "gpt-3.5-turbo",
+    "api_key": "sk-QnZawWHyxlPsNbxpDdipoxAojxfV080NrGrTfFPrnO9Jt8qv",
+    "base_url": "https://api.chatanywhere.tech"
+  },
+  "ollama": {
+    "model": "llama2",
+    "base_url": "http://localhost:11434",
+    "embedding_model": "nomic-embed-text"
+  }
+}

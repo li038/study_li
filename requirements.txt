@@ -10,3 +10,6 @@ python-multipart==0.0.6
 uvicorn==0.24.0
 pydantic==2.5.0
 chromadb
+python-docx
+python-pptx
+openpyxl
